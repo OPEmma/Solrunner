@@ -344,7 +344,7 @@ export default function App() {
       chunks.map((chunk) =>
         axiosWithTimeout({
           method: "GET",
-          url: `${DEX_BASE}/latest/dex/tokens/${chunk.join(",")}`,
+          url: `${DEX_BASE}/tokens/v1/solana/${chunk.join(",")}`,
         }),
       ),
     );
@@ -390,7 +390,7 @@ export default function App() {
       chunks.map((chunk) =>
         axiosWithTimeout({
           method: "GET",
-          url: `${DEX_BASE}/latest/dex/tokens/${chunk.join(",")}`,
+          url: `${DEX_BASE}/tokens/v1/solana/${chunk.join(",")}`,
         }),
       ),
     );
@@ -614,16 +614,14 @@ export default function App() {
       // enters the universe.
       candidates = await enrichWithDexScreener(candidates);
 
-      const classified = candidates.map(classify).filter((token) => {
-        if (safeNum(token.liquidity) < safeNum(settings.minLiquidity)) {
-          return false;
-        }
-
-        // Discovery is intentionally inclusive:
-        // keep tokens with either FAST momentum OR high holders.
-        // We do not require an age bucket for FAST/HOLDERS views.
-        return token.fast || token.holderHeavy;
-      });
+      // ALL is the raw discovered universe. Signal tabs are filters,
+      // not discovery gates. A missing holder/price metric must never
+      // make a token disappear from ALL.
+      const classified = candidates
+        .map(classify)
+        .filter(
+          (token) => safeNum(token.liquidity) >= safeNum(settings.minLiquidity),
+        );
 
       const sortByResearchValue = (a, b) =>
         b.fastScore - a.fastScore ||
