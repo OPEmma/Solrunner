@@ -12,40 +12,36 @@ import {
   Users,
   TrendingUp,
   Activity,
+  AlertTriangle,
 } from "lucide-react";
 
-/**
- * SOLRUNNER — broader Solana meme-token discovery
- *
- * Discovery:
- *   1) Birdeye Meme Token List (preferred): broad meme-token universe
- *   2) DexScreener latest profiles + boosts (fallback / additional coverage)
- *
- * Classification:
- *   - FAST: strong recent price/volume momentum
- *   - HOLDERS: high reported holder count
- *   - BOTH: satisfies both
- *   - ALL: union of everything discovered
- *
- * IMPORTANT:
- * API keys in a React frontend are visible to users.
- * For production, proxy Birdeye/Solscan through your own backend.
- */
-
-const BIRDEYE_BASE = "https://public-api.birdeye.so";
 const DEX_BASE = "https://api.dexscreener.com";
+const BIRDEYE_BASE = "https://public-api.birdeye.so";
+
+const AGE_BUCKETS = ["0-5m", "5-10m", "10-15m", "15-30m", "30-60m"];
 
 const DEFAULTS = {
-  maxResults: 150,
+  maxResults: 200,
   minHolders: 500,
-  minFastPrice5m: 8, // percent
-  minFastVolume5m: 5000, // USD
+  minFastPrice5m: 8,
+  minFastVolume5m: 5000,
   minFastTxns5m: 25,
-  minLiquidity: 0, // inclusive by default
-  onlySolana: true,
+  minLiquidity: 0,
 };
 
-const safeNum = (value, fallback = 0) => {
+const makeEmpty = () => ({
+  ALL: [],
+  FAST: [],
+  HOLDERS: [],
+  BOTH: [],
+  "0-5m": [],
+  "5-10m": [],
+  "10-15m": [],
+  "15-30m": [],
+  "30-60m": [],
+});
+
+const num = (value, fallback = 0) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 };
@@ -58,47 +54,105 @@ const firstNumber = (...values) => {
   return 0;
 };
 
-const formatUsd = (num) =>
+const formatUsd = (value) =>
   new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
-    notation: Math.abs(num) >= 1_000_000 ? "compact" : "standard",
-    maximumFractionDigits: Math.abs(num) < 10 ? 2 : 0,
-  }).format(safeNum(num));
+    notation: Math.abs(num(value)) >= 1_000_000 ? "compact" : "standard",
+    maximumFractionDigits: Math.abs(num(value)) < 10 ? 2 : 0,
+  }).format(num(value));
 
-const formatNumber = (num) =>
+const formatNumber = (value) =>
   new Intl.NumberFormat("en-US", {
     notation: "compact",
     maximumFractionDigits: 1,
-  }).format(safeNum(num));
+  }).format(num(value));
 
-const pct = (num) => `${safeNum(num).toFixed(1)}%`;
+const formatPct = (value) => `${num(value).toFixed(1)}%`;
 
 const shortAddress = (address = "") =>
   address.length > 14
     ? `${address.slice(0, 6)}...${address.slice(-6)}`
     : address;
 
-const buildBirdeyeParams = (extra = {}) => ({
-  sort_by: "holder",
-  sort_type: "desc",
-  source: "all",
-  offset: 0,
-  limit: 100,
-  ...extra,
-});
+async function getJson(url, config = {}, timeout = 15000) {
+  const response = await axios({
+    url,
+    timeout,
+    validateStatus: () => true,
+    ...config,
+    headers: {
+      Accept: "application/json",
+      ...(config.headers || {}),
+    },
+  });
 
-const normalizeBirdeyeToken = (item = {}, source = "Birdeye") => {
+  if (response.status < 200 || response.status >= 300) {
+    const message =
+      response?.data?.message ||
+      response?.data?.error ||
+      `HTTP ${response.status}`;
+    const error = new Error(message);
+    error.status = response.status;
+    error.response = response;
+    throw error;
+  }
+
+  return response.data;
+}
+
+function extractPairs(payload) {
+  // DexScreener endpoints have returned both arrays and { pairs: [] }
+  // across endpoint families/versions. Handle both safely.
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.pairs)) return payload.pairs;
+  if (Array.isArray(payload?.data)) return payload.data;
+  return [];
+}
+
+function extractRows(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.data?.items)) return payload.data.items;
+  if (Array.isArray(payload?.data?.tokens)) return payload.data.tokens;
+  if (Array.isArray(payload?.data?.results)) return payload.data.results;
+  if (Array.isArray(payload?.items)) return payload.items;
+  return [];
+}
+
+function normalizeDexPair(pair = {}) {
+  return {
+    address: pair.baseToken?.address || "",
+    name: pair.baseToken?.name || pair.baseToken?.symbol || "Unknown",
+    symbol: pair.baseToken?.symbol || "UNKNOWN",
+    source: "DexScreener",
+    priceUsd: num(pair.priceUsd),
+    liquidity: num(pair.liquidity?.usd),
+    marketCap: num(pair.marketCap),
+    fdv: num(pair.fdv),
+    volume5m: num(pair.volume?.m5),
+    volume1h: num(pair.volume?.h1),
+    priceChange1m: num(pair.priceChange?.m1),
+    priceChange5m: num(pair.priceChange?.m5),
+    priceChange1h: num(pair.priceChange?.h1),
+    txns5m: num(pair.txns?.m5?.buys) + num(pair.txns?.m5?.sells),
+    buys5m: num(pair.txns?.m5?.buys),
+    sells5m: num(pair.txns?.m5?.sells),
+    pairCreatedAt: num(pair.pairCreatedAt),
+    dexUrl: pair.url || "",
+    pairAddress: pair.pairAddress || "",
+  };
+}
+
+function normalizeBirdeyeToken(item = {}) {
   const address =
-    item.address || item.tokenAddress || item.token_address || item.mint;
-
-  if (!address) return null;
+    item.address || item.tokenAddress || item.token_address || item.mint || "";
 
   return {
     address,
     name: item.name || item.symbol || "Unknown",
     symbol: item.symbol || "UNKNOWN",
-    source,
+    source: "Birdeye",
     holders: firstNumber(
       item.holder,
       item.holders,
@@ -106,13 +160,28 @@ const normalizeBirdeyeToken = (item = {}, source = "Birdeye") => {
       item.holder_count,
     ),
     priceUsd: firstNumber(item.price, item.priceUsd, item.price_usd),
+    liquidity: firstNumber(
+      item.liquidity,
+      item.liquidityUsd,
+      item.liquidity_usd,
+    ),
+    marketCap: firstNumber(item.market_cap, item.marketCap),
+    fdv: firstNumber(item.fdv),
     volume1m: firstNumber(item.volume_1m_usd, item.volume1mUsd),
     volume5m: firstNumber(item.volume_5m_usd, item.volume5mUsd),
     volume30m: firstNumber(item.volume_30m_usd, item.volume30mUsd),
     volume1h: firstNumber(item.volume_1h_usd, item.volume1hUsd),
+    volume1mChange: firstNumber(
+      item.volume_1m_change_percent,
+      item.volume1mChangePercent,
+    ),
     volume5mChange: firstNumber(
       item.volume_5m_change_percent,
       item.volume5mChangePercent,
+    ),
+    priceChange1m: firstNumber(
+      item.price_change_1m_percent,
+      item.priceChange1mPercent,
     ),
     priceChange5m: firstNumber(
       item.price_change_5m_percent,
@@ -122,8 +191,8 @@ const normalizeBirdeyeToken = (item = {}, source = "Birdeye") => {
       item.price_change_1h_percent,
       item.priceChange1hPercent,
     ),
-    marketCap: firstNumber(item.market_cap, item.marketCap),
-    liquidity: firstNumber(item.liquidity),
+    trade1m: firstNumber(item.trade_1m_count, item.trade1mCount),
+    trade5m: firstNumber(item.trade_5m_count, item.trade5mCount),
     createdTime: firstNumber(
       item.creation_time,
       item.created_time,
@@ -137,393 +206,329 @@ const normalizeBirdeyeToken = (item = {}, source = "Birdeye") => {
       item.last_trade_unix_time,
       item.lastTradeUnixTime,
     ),
-    sourcePlatform: item.source || item.platform || null,
   };
-};
-
-const normalizeDexPair = (pair = {}, source = "DexScreener") => ({
-  address: pair.baseToken?.address,
-  name: pair.baseToken?.name || pair.baseToken?.symbol || "Unknown",
-  symbol: pair.baseToken?.symbol || "UNKNOWN",
-  source,
-  priceUsd: safeNum(pair.priceUsd),
-  volume5m: safeNum(pair.volume?.m5),
-  volume1h: safeNum(pair.volume?.h1),
-  liquidity: safeNum(pair.liquidity?.usd),
-  fdv: safeNum(pair.fdv),
-  marketCap: safeNum(pair.marketCap),
-  txns5m: safeNum(pair.txns?.m5?.buys) + safeNum(pair.txns?.m5?.sells),
-  buys5m: safeNum(pair.txns?.m5?.buys),
-  sells5m: safeNum(pair.txns?.m5?.sells),
-  priceChange5m: safeNum(pair.priceChange?.m5),
-  priceChange1h: safeNum(pair.priceChange?.h1),
-  pairCreatedAt: safeNum(pair.pairCreatedAt),
-  dexUrl: pair.url || "",
-  pairAddress: pair.pairAddress || "",
-});
+}
 
 export default function App() {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("ALL");
   const [copiedAddress, setCopiedAddress] = useState(null);
+  const [lastScanned, setLastScanned] = useState(null);
+  const [errors, setErrors] = useState([]);
+  const [showSettings, setShowSettings] = useState(false);
 
   const [birdeyeApiKey, setBirdeyeApiKey] = useState(
     () => localStorage.getItem("BIRDEYE_KEY") || "",
   );
 
   const [settings, setSettings] = useState(DEFAULTS);
-  const [showSettings, setShowSettings] = useState(false);
-
-  const AGE_BUCKETS = ["0-5m", "5-10m", "10-15m", "15-30m", "30-60m"];
-
-  const [tokens, setTokens] = useState({
-    ALL: [],
-    FAST: [],
-    HOLDERS: [],
-    BOTH: [],
-    "0-5m": [],
-    "5-10m": [],
-    "10-15m": [],
-    "15-30m": [],
-    "30-60m": [],
+  const [tokens, setTokens] = useState(makeEmpty());
+  const [discoveryStats, setDiscoveryStats] = useState({
+    profiles: 0,
+    boosts: 0,
+    dexPairs: 0,
+    birdeye: 0,
+    merged: 0,
   });
-
-  const [lastScanned, setLastScanned] = useState(null);
-  const [errors, setErrors] = useState([]);
 
   const saveKey = () => {
     localStorage.setItem("BIRDEYE_KEY", birdeyeApiKey.trim());
   };
 
-  const axiosWithTimeout = (config, timeout = 12000) =>
-    axios({
-      timeout,
-      ...config,
-    });
-
-  /**
-   * Birdeye gives us a broad discovery layer and directly exposes
-   * holder counts plus short-window volume/price fields.
-   *
-   * We intentionally query multiple ranked views and UNION them.
-   * That is much more inclusive than taking only one ranking.
-   */
-  const discoverFromBirdeye = async () => {
-    if (!birdeyeApiKey.trim()) return [];
-
-    const headers = {
-      "X-API-KEY": birdeyeApiKey.trim(),
-      "x-chain": "solana",
-    };
-
-    const queries = [
-      buildBirdeyeParams({
-        sort_by: "holder",
-      }),
-      buildBirdeyeParams({
-        sort_by: "volume_5m_usd",
-      }),
-      buildBirdeyeParams({
-        sort_by: "price_change_5m_percent",
-      }),
-      buildBirdeyeParams({
-        sort_by: "volume_1m_usd",
-      }),
-    ];
-
-    const results = await Promise.allSettled(
-      queries.map((params) =>
-        axiosWithTimeout({
-          method: "GET",
-          url: `${BIRDEYE_BASE}/defi/v3/token/meme/list`,
-          headers,
-          params,
-        }),
-      ),
-    );
-
-    const out = new Map();
-
-    results.forEach((result) => {
-      if (result.status !== "fulfilled") return;
-
-      const rows =
-        result.value?.data?.data?.items || result.value?.data?.data || [];
-
-      rows.forEach((row) => {
-        const token = normalizeBirdeyeToken(row);
-        if (!token) return;
-
-        const existing = out.get(token.address);
-
-        // Keep the richest non-zero values when the same CA
-        // appears in multiple ranked views.
-        if (!existing) {
-          out.set(token.address, token);
-          return;
-        }
-
-        out.set(token.address, {
-          ...existing,
-          name: existing.name !== "Unknown" ? existing.name : token.name,
-          symbol:
-            existing.symbol !== "UNKNOWN" ? existing.symbol : token.symbol,
-          holders: Math.max(existing.holders, token.holders),
-          priceUsd: firstNumber(existing.priceUsd, token.priceUsd),
-          volume1m: Math.max(existing.volume1m, token.volume1m),
-          volume5m: Math.max(existing.volume5m, token.volume5m),
-          volume30m: Math.max(existing.volume30m, token.volume30m),
-          volume1h: Math.max(existing.volume1h, token.volume1h),
-          volume5mChange: Math.max(
-            existing.volume5mChange,
-            token.volume5mChange,
-          ),
-          priceChange5m: Math.max(existing.priceChange5m, token.priceChange5m),
-          priceChange1h: Math.max(existing.priceChange1h, token.priceChange1h),
-          marketCap: Math.max(existing.marketCap, token.marketCap),
-          liquidity: Math.max(existing.liquidity, token.liquidity),
-          createdTime: firstNumber(existing.createdTime, token.createdTime),
-          recentListingTime: firstNumber(
-            existing.recentListingTime,
-            token.recentListingTime,
-          ),
-          lastTradeTime: firstNumber(
-            existing.lastTradeTime,
-            token.lastTradeTime,
-          ),
-        });
-      });
-    });
-
-    return [...out.values()];
-  };
-
-  /**
-   * DexScreener is kept as an additional discovery source / fallback.
-   * Unlike the old version, we do NOT immediately slice the discovered
-   * addresses to 30 before classification.
-   */
-  const discoverFromDexScreener = async () => {
-    const [profiles, boosts] = await Promise.allSettled([
-      axiosWithTimeout({
-        method: "GET",
-        url: `${DEX_BASE}/token-profiles/latest/v1`,
-      }),
-      axiosWithTimeout({
-        method: "GET",
-        url: `${DEX_BASE}/token-boosts/latest/v1`,
-      }),
-    ]);
-
-    const addresses = new Set();
-
-    if (profiles.status === "fulfilled") {
-      (profiles.value?.data || [])
-        .filter((x) => x.chainId === "solana" && x.tokenAddress)
-        .forEach((x) => addresses.add(x.tokenAddress));
-    }
-
-    if (boosts.status === "fulfilled") {
-      (boosts.value?.data || [])
-        .filter((x) => x.chainId === "solana" && x.tokenAddress)
-        .forEach((x) => addresses.add(x.tokenAddress));
-    }
-
-    const addressList = [...addresses];
-
-    if (!addressList.length) return [];
-
-    // DexScreener's token endpoint accepts comma-separated addresses.
-    // Batch conservatively to avoid giant URLs.
-    const chunks = [];
-    for (let i = 0; i < addressList.length; i += 25) {
-      chunks.push(addressList.slice(i, i + 25));
-    }
-
-    const pairResults = await Promise.allSettled(
-      chunks.map((chunk) =>
-        axiosWithTimeout({
-          method: "GET",
-          url: `${DEX_BASE}/tokens/v1/solana/${chunk.join(",")}`,
-        }),
-      ),
-    );
-
-    const out = new Map();
-
-    pairResults.forEach((result) => {
-      if (result.status !== "fulfilled") return;
-
-      const pairs = result.value?.data?.pairs || [];
-
-      pairs
-        .filter((p) => p.chainId === "solana")
-        .sort((a, b) => safeNum(b.liquidity?.usd) - safeNum(a.liquidity?.usd))
-        .forEach((pair) => {
-          const token = normalizeDexPair(pair);
-          if (!token.address || out.has(token.address)) return;
-          out.set(token.address, token);
-        });
-    });
-
-    return [...out.values()];
-  };
-
-  /**
-   * Enrich candidates with the best available DexScreener pair data.
-   * This also means a token discovered from Birdeye gets a DEX URL,
-   * liquidity, transaction count, and pair timestamps when available.
-   */
-  const enrichWithDexScreener = async (candidateTokens) => {
-    const addresses = [
-      ...new Set(candidateTokens.map((x) => x.address)),
-    ].filter(Boolean);
-
-    if (!addresses.length) return [];
-
-    const chunks = [];
-    for (let i = 0; i < addresses.length; i += 25) {
-      chunks.push(addresses.slice(i, i + 25));
-    }
-
-    const results = await Promise.allSettled(
-      chunks.map((chunk) =>
-        axiosWithTimeout({
-          method: "GET",
-          url: `${DEX_BASE}/tokens/v1/solana/${chunk.join(",")}`,
-        }),
-      ),
-    );
-
-    const byAddress = new Map();
-
-    results.forEach((result) => {
-      if (result.status !== "fulfilled") return;
-
-      const pairs = result.value?.data?.pairs || [];
-
-      pairs
-        .filter((p) => p.chainId === "solana")
-        .sort((a, b) => safeNum(b.liquidity?.usd) - safeNum(a.liquidity?.usd))
-        .forEach((pair) => {
-          const row = normalizeDexPair(pair);
-          if (!row.address || byAddress.has(row.address)) return;
-          byAddress.set(row.address, row);
-        });
-    });
-
-    return candidateTokens.map((token) => {
-      const dex = byAddress.get(token.address);
-
-      if (!dex) {
-        return {
-          ...token,
-          liquidity: safeNum(token.liquidity),
-          priceChange5m: safeNum(token.priceChange5m),
-          volume5m: safeNum(token.volume5m),
-          dexUrl: "",
-          pairAddress: "",
-          pairCreatedAt: 0,
-          txns5m: 0,
-          buys5m: 0,
-          sells5m: 0,
-        };
-      }
-
-      return {
-        ...token,
-        // Prefer Birdeye holder count. DexScreener does not provide
-        // a trustworthy global holder count here.
-        name: token.name || dex.name,
-        symbol: token.symbol || dex.symbol,
-        priceUsd: firstNumber(token.priceUsd, dex.priceUsd),
-        volume5m: Math.max(token.volume5m, dex.volume5m),
-        volume1h: Math.max(token.volume1h, dex.volume1h),
-        liquidity: Math.max(token.liquidity, dex.liquidity),
-        marketCap: Math.max(token.marketCap, dex.marketCap),
-        priceChange5m: firstNumber(token.priceChange5m, dex.priceChange5m),
-        priceChange1h: firstNumber(token.priceChange1h, dex.priceChange1h),
-        pairCreatedAt: dex.pairCreatedAt,
-        txns5m: dex.txns5m,
-        buys5m: dex.buys5m,
-        sells5m: dex.sells5m,
-        dexUrl: dex.dexUrl,
-        pairAddress: dex.pairAddress,
-      };
-    });
-  };
-
-  const calculateFastScore = (token) => {
-    const price = Math.max(0, safeNum(token.priceChange5m));
-    const volume = Math.max(0, safeNum(token.volume5m));
-    const volumeChange = Math.max(0, safeNum(token.volume5mChange));
-    const txns = Math.max(0, safeNum(token.txns5m));
-
-    // No attempt is made to call this an investment signal.
-    // It is simply a ranking score for recent market activity.
-    return (
-      Math.min(price, 100) * 2.0 +
-      Math.min(volumeChange, 500) * 0.12 +
-      Math.log10(volume + 1) * 5 +
-      Math.min(txns, 1000) * 0.01
-    );
-  };
-
   const getAgeMinutes = (token) => {
-    const candidates = [
+    const timestamps = [
       token.createdTime,
       token.recentListingTime,
       token.pairCreatedAt,
     ]
-      .map(safeNum)
-      .filter((n) => n > 0);
+      .map((raw) => {
+        const value = num(raw);
+        if (!value) return 0;
+        return value < 10_000_000_000 ? value * 1000 : value;
+      })
+      .filter(Boolean);
 
-    if (!candidates.length) return null;
+    if (!timestamps.length) return null;
 
-    // API timestamps may be either seconds or milliseconds.
-    const raw = Math.min(...candidates);
-    const createdMs = raw < 10_000_000_000 ? raw * 1000 : raw;
-
+    const createdMs = Math.min(...timestamps);
     const age = (Date.now() - createdMs) / 60000;
-    return Number.isFinite(age) ? age : null;
+    return Number.isFinite(age) && age >= 0 ? age : null;
   };
 
-  const getAgeBucket = (ageMinutes) => {
-    if (ageMinutes === null || ageMinutes < 0) return null;
-    if (ageMinutes <= 5) return "0-5m";
-    if (ageMinutes <= 10) return "5-10m";
-    if (ageMinutes <= 15) return "10-15m";
-    if (ageMinutes <= 30) return "15-30m";
-    if (ageMinutes <= 60) return "30-60m";
+  const getAgeBucket = (age) => {
+    if (age === null) return null;
+    if (age <= 5) return "0-5m";
+    if (age <= 10) return "5-10m";
+    if (age <= 15) return "10-15m";
+    if (age <= 30) return "15-30m";
+    if (age <= 60) return "30-60m";
     return null;
   };
 
+  const calculateFastScore = (token) => {
+    const price1m = Math.max(0, num(token.priceChange1m));
+    const price5m = Math.max(0, num(token.priceChange5m));
+    const volume1m = Math.max(0, num(token.volume1m));
+    const volume5m = Math.max(0, num(token.volume5m));
+    const volume5mChange = Math.max(0, num(token.volume5mChange));
+    const trades = num(token.trade5m) || num(token.txns5m);
+
+    return (
+      Math.min(price1m, 100) * 2.5 +
+      Math.min(price5m, 200) * 1.5 +
+      Math.log10(volume1m + 1) * 4 +
+      Math.log10(volume5m + 1) * 3 +
+      Math.min(volume5mChange, 1000) * 0.08 +
+      Math.min(trades, 2000) * 0.01
+    );
+  };
+
+  const discoverDexProfilesAndBoosts = async () => {
+    const [profilesResult, boostsResult] = await Promise.allSettled([
+      getJson(`${DEX_BASE}/token-profiles/latest/v1`),
+      getJson(`${DEX_BASE}/token-boosts/latest/v1`),
+    ]);
+
+    const addresses = new Set();
+    let profilesCount = 0;
+    let boostsCount = 0;
+    const sourceErrors = [];
+
+    if (profilesResult.status === "fulfilled") {
+      const rows = extractRows(profilesResult.value);
+      profilesCount = rows.length;
+      rows
+        .filter((item) => item.chainId === "solana" && item.tokenAddress)
+        .forEach((item) => addresses.add(item.tokenAddress));
+    } else {
+      sourceErrors.push(
+        `Dex profiles: ${profilesResult.reason?.message || "request failed"}`,
+      );
+    }
+
+    if (boostsResult.status === "fulfilled") {
+      const rows = extractRows(boostsResult.value);
+      boostsCount = rows.length;
+      rows
+        .filter((item) => item.chainId === "solana" && item.tokenAddress)
+        .forEach((item) => addresses.add(item.tokenAddress));
+    } else {
+      sourceErrors.push(
+        `Dex boosts: ${boostsResult.reason?.message || "request failed"}`,
+      );
+    }
+
+    return {
+      addresses: [...addresses],
+      profilesCount,
+      boostsCount,
+      sourceErrors,
+    };
+  };
+
+  const fetchDexPairs = async (addresses) => {
+    if (!addresses.length) return [];
+
+    const chunks = [];
+    for (let i = 0; i < addresses.length; i += 30) {
+      chunks.push(addresses.slice(i, i + 30));
+    }
+
+    const results = await Promise.allSettled(
+      chunks.map((chunk) =>
+        getJson(`${DEX_BASE}/tokens/v1/solana/${chunk.join(",")}`),
+      ),
+    );
+
+    const byAddress = new Map();
+    const sourceErrors = [];
+
+    results.forEach((result) => {
+      if (result.status === "rejected") {
+        sourceErrors.push(
+          `Dex token lookup: ${result.reason?.message || "request failed"}`,
+        );
+        return;
+      }
+
+      // IMPORTANT FIX: /tokens/v1 returns an ARRAY of pairs.
+      // The old app incorrectly expected response.data.pairs here.
+      const pairs = extractPairs(result.value);
+
+      pairs
+        .filter((pair) => pair.chainId === "solana")
+        .sort((a, b) => num(b.liquidity?.usd) - num(a.liquidity?.usd))
+        .forEach((pair) => {
+          const token = normalizeDexPair(pair);
+          if (!token.address || byAddress.has(token.address)) return;
+          byAddress.set(token.address, token);
+        });
+    });
+
+    return { tokens: [...byAddress.values()], sourceErrors };
+  };
+
+  const discoverBirdeye = async () => {
+    const key = birdeyeApiKey.trim();
+    if (!key) return { tokens: [], sourceErrors: [] };
+
+    // One reliable meme-list request is better than several guessed sort modes.
+    // The endpoint supports sorting/filtering/pagination, while the response
+    // contains summary market data. We can use its data without making it
+    // a hard dependency for the app.
+    try {
+      const payload = await getJson(`${BIRDEYE_BASE}/defi/v3/token/meme/list`, {
+        headers: {
+          "X-API-KEY": key,
+          "x-chain": "solana",
+        },
+        params: {
+          sort_by: "holder",
+          sort_type: "desc",
+          source: "all",
+          offset: 0,
+          limit: 100,
+        },
+      });
+
+      const rows = extractRows(payload);
+      const tokens = rows
+        .map(normalizeBirdeyeToken)
+        .filter((token) => token.address);
+
+      return { tokens, sourceErrors: [] };
+    } catch (error) {
+      return {
+        tokens: [],
+        sourceErrors: [`Birdeye: ${error.message || "request failed"}`],
+      };
+    }
+  };
+
+  const mergeTokens = (groups) => {
+    const merged = new Map();
+
+    groups.flat().forEach((token) => {
+      if (!token.address) return;
+
+      const old = merged.get(token.address);
+      if (!old) {
+        merged.set(token.address, token);
+        return;
+      }
+
+      merged.set(token.address, {
+        ...old,
+        name: old.name !== "Unknown" ? old.name : token.name,
+        symbol: old.symbol !== "UNKNOWN" ? old.symbol : token.symbol,
+        source:
+          old.source === token.source ? old.source : "Birdeye + DexScreener",
+        holders: Math.max(num(old.holders), num(token.holders)),
+        priceUsd: firstNumber(old.priceUsd, token.priceUsd),
+        liquidity: Math.max(num(old.liquidity), num(token.liquidity)),
+        marketCap: Math.max(num(old.marketCap), num(token.marketCap)),
+        fdv: Math.max(num(old.fdv), num(token.fdv)),
+        volume1m: Math.max(num(old.volume1m), num(token.volume1m)),
+        volume5m: Math.max(num(old.volume5m), num(token.volume5m)),
+        volume1h: Math.max(num(old.volume1h), num(token.volume1h)),
+        volume5mChange: Math.max(
+          num(old.volume5mChange),
+          num(token.volume5mChange),
+        ),
+        priceChange1m: firstNumber(old.priceChange1m, token.priceChange1m),
+        priceChange5m: firstNumber(old.priceChange5m, token.priceChange5m),
+        priceChange1h: firstNumber(old.priceChange1h, token.priceChange1h),
+        trade1m: Math.max(num(old.trade1m), num(token.trade1m)),
+        trade5m: Math.max(num(old.trade5m), num(token.trade5m)),
+        txns5m: Math.max(num(old.txns5m), num(token.txns5m)),
+        buys5m: Math.max(num(old.buys5m), num(token.buys5m)),
+        sells5m: Math.max(num(old.sells5m), num(token.sells5m)),
+        createdTime: firstNumber(old.createdTime, token.createdTime),
+        recentListingTime: firstNumber(
+          old.recentListingTime,
+          token.recentListingTime,
+        ),
+        lastTradeTime: firstNumber(old.lastTradeTime, token.lastTradeTime),
+        pairCreatedAt: firstNumber(old.pairCreatedAt, token.pairCreatedAt),
+        dexUrl: old.dexUrl || token.dexUrl || "",
+        pairAddress: old.pairAddress || token.pairAddress || "",
+      });
+    });
+
+    return [...merged.values()];
+  };
+
+  const enrichWithDex = async (candidateTokens) => {
+    const addresses = [
+      ...new Set(candidateTokens.map((token) => token.address).filter(Boolean)),
+    ];
+    if (!addresses.length) return { tokens: candidateTokens, sourceErrors: [] };
+
+    const pairResult = await fetchDexPairs(addresses);
+    const dexByAddress = new Map(
+      pairResult.tokens.map((token) => [token.address, token]),
+    );
+
+    const enriched = candidateTokens.map((token) => {
+      const dex = dexByAddress.get(token.address);
+      if (!dex) return token;
+
+      return {
+        ...token,
+        name: token.name !== "Unknown" ? token.name : dex.name,
+        symbol: token.symbol !== "UNKNOWN" ? token.symbol : dex.symbol,
+        priceUsd: firstNumber(token.priceUsd, dex.priceUsd),
+        liquidity: Math.max(num(token.liquidity), num(dex.liquidity)),
+        marketCap: Math.max(num(token.marketCap), num(dex.marketCap)),
+        fdv: Math.max(num(token.fdv), num(dex.fdv)),
+        volume5m: Math.max(num(token.volume5m), num(dex.volume5m)),
+        volume1h: Math.max(num(token.volume1h), num(dex.volume1h)),
+        priceChange1m: firstNumber(token.priceChange1m, dex.priceChange1m),
+        priceChange5m: firstNumber(token.priceChange5m, dex.priceChange5m),
+        priceChange1h: firstNumber(token.priceChange1h, dex.priceChange1h),
+        txns5m: Math.max(num(token.txns5m), num(dex.txns5m)),
+        buys5m: Math.max(num(token.buys5m), num(dex.buys5m)),
+        sells5m: Math.max(num(token.sells5m), num(dex.sells5m)),
+        pairCreatedAt: firstNumber(token.pairCreatedAt, dex.pairCreatedAt),
+        dexUrl: token.dexUrl || dex.dexUrl,
+        pairAddress: token.pairAddress || dex.pairAddress,
+      };
+    });
+
+    // Include DEX pairs not originally present in a profile/boost response.
+    // This is useful when the profile endpoints are sparse.
+    const existing = new Map(enriched.map((token) => [token.address, token]));
+    pairResult.tokens.forEach((token) => {
+      if (!existing.has(token.address)) existing.set(token.address, token);
+    });
+
+    return {
+      tokens: [...existing.values()],
+      sourceErrors: pairResult.sourceErrors,
+    };
+  };
+
   const classify = (token) => {
-    const holders = safeNum(token.holders);
-
-    const price5m = safeNum(token.priceChange5m);
-    const volume5m = safeNum(token.volume5m);
-    const volume5mChange = safeNum(token.volume5mChange);
-    const txns5m = safeNum(token.txns5m);
-
-    // A token can qualify as FAST through multiple independent paths.
-    // This prevents a single missing metric from killing discovery.
-    const fast =
-      price5m >= settings.minFastPrice5m ||
-      volume5m >= settings.minFastVolume5m ||
-      volume5mChange >= 100 ||
-      txns5m >= settings.minFastTxns5m;
-
-    const holderHeavy = holders >= settings.minHolders;
     const ageMinutes = getAgeMinutes(token);
     const ageBucket = getAgeBucket(ageMinutes);
 
+    const fast =
+      num(token.priceChange1m) >= settings.minFastPrice5m / 2 ||
+      num(token.priceChange5m) >= settings.minFastPrice5m ||
+      num(token.volume1m) >= settings.minFastVolume5m / 5 ||
+      num(token.volume5m) >= settings.minFastVolume5m ||
+      num(token.volume5mChange) >= 100 ||
+      num(token.txns5m) >= settings.minFastTxns5m;
+
+    const holderHeavy = num(token.holders) >= settings.minHolders;
+
     return {
       ...token,
-      fast,
-      holderHeavy,
       ageMinutes,
       ageBucket,
+      fast,
+      holderHeavy,
+      fastScore: calculateFastScore(token),
       category:
         fast && holderHeavy
           ? "BOTH"
@@ -531,8 +536,7 @@ export default function App() {
             ? "FAST"
             : holderHeavy
               ? "HOLDERS"
-              : null,
-      fastScore: calculateFastScore(token),
+              : "WATCH",
     };
   };
 
@@ -541,148 +545,83 @@ export default function App() {
     setErrors([]);
 
     try {
-      let candidates = [];
+      const dexDiscovery = await discoverDexProfilesAndBoosts();
+      const birdeyeDiscovery = await discoverBirdeye();
 
-      // Preferred broad discovery.
-      if (birdeyeApiKey.trim()) {
-        try {
-          candidates = await discoverFromBirdeye();
-        } catch (error) {
-          console.error("Birdeye discovery failed:", error);
-          setErrors((prev) => [
-            ...prev,
-            "Birdeye discovery failed; DexScreener fallback was used.",
-          ]);
-        }
-      }
+      const dexPairDiscovery = await fetchDexPairs(dexDiscovery.addresses);
 
-      // Always add DexScreener discovery to broaden coverage.
-      try {
-        const dexCandidates = await discoverFromDexScreener();
+      let candidates = mergeTokens([
+        dexPairDiscovery.tokens,
+        birdeyeDiscovery.tokens,
+      ]);
 
-        const merged = new Map(
-          candidates.map((token) => [token.address, token]),
-        );
+      // Second pass enriches any Birdeye-only CAs with current DEX information.
+      const enriched = await enrichWithDex(candidates);
+      candidates = enriched.tokens;
 
-        dexCandidates.forEach((token) => {
-          const existing = merged.get(token.address);
+      const errorsFound = [
+        ...dexDiscovery.sourceErrors,
+        ...dexPairDiscovery.sourceErrors,
+        ...birdeyeDiscovery.sourceErrors,
+        ...enriched.sourceErrors,
+      ];
+      setErrors(errorsFound);
 
-          if (!existing) {
-            merged.set(token.address, token);
-          } else {
-            merged.set(token.address, {
-              ...existing,
-              name: existing.name !== "Unknown" ? existing.name : token.name,
-              symbol:
-                existing.symbol !== "UNKNOWN" ? existing.symbol : token.symbol,
-              priceUsd: firstNumber(existing.priceUsd, token.priceUsd),
-              volume5m: Math.max(existing.volume5m, token.volume5m),
-              volume1h: Math.max(existing.volume1h, token.volume1h),
-              liquidity: Math.max(existing.liquidity, token.liquidity),
-              marketCap: Math.max(existing.marketCap, token.marketCap),
-              priceChange5m: firstNumber(
-                existing.priceChange5m,
-                token.priceChange5m,
-              ),
-              priceChange1h: firstNumber(
-                existing.priceChange1h,
-                token.priceChange1h,
-              ),
-              pairCreatedAt: existing.pairCreatedAt || token.pairCreatedAt,
-              txns5m: Math.max(existing.txns5m || 0, token.txns5m || 0),
-              buys5m: Math.max(existing.buys5m || 0, token.buys5m || 0),
-              sells5m: Math.max(existing.sells5m || 0, token.sells5m || 0),
-              dexUrl: existing.dexUrl || token.dexUrl,
-              pairAddress: existing.pairAddress || token.pairAddress,
-            });
-          }
-        });
-
-        candidates = [...merged.values()];
-      } catch (error) {
-        console.error("DexScreener discovery failed:", error);
-        setErrors((prev) => [...prev, "DexScreener discovery failed."]);
-      }
-
-      if (!candidates.length) {
-        throw new Error(
-          "No candidates were discovered. Add a Birdeye key or try again.",
-        );
-      }
-
-      // DEX enrichment is useful, but does not decide whether a token
-      // enters the universe.
-      candidates = await enrichWithDexScreener(candidates);
-
-      // ALL is the raw discovered universe. Signal tabs are filters,
-      // not discovery gates. A missing holder/price metric must never
-      // make a token disappear from ALL.
+      // IMPORTANT: liquidity is the only default numeric gate.
+      // ALL stays broad; FAST/HOLDERS/BOTH are views over the same universe.
       const classified = candidates
         .map(classify)
-        .filter(
-          (token) => safeNum(token.liquidity) >= safeNum(settings.minLiquidity),
-        );
+        .filter((token) => num(token.liquidity) >= num(settings.minLiquidity));
 
-      const sortByResearchValue = (a, b) =>
+      const sortResearch = (a, b) =>
         b.fastScore - a.fastScore ||
-        safeNum(b.holders) - safeNum(a.holders) ||
-        safeNum(b.volume5m) - safeNum(a.volume5m);
+        num(b.holders) - num(a.holders) ||
+        num(b.volume5m) - num(a.volume5m);
 
-      const sortByHolders = (a, b) =>
-        safeNum(b.holders) - safeNum(a.holders) || b.fastScore - a.fastScore;
+      const sortHolders = (a, b) =>
+        num(b.holders) - num(a.holders) || b.fastScore - a.fastScore;
 
-      const sortByAgeThenMomentum = (a, b) =>
-        safeNum(a.ageMinutes, Number.POSITIVE_INFINITY) -
-          safeNum(b.ageMinutes, Number.POSITIVE_INFINITY) ||
-        sortByResearchValue(a, b);
-
-      // Age buckets contain everything relevant in that age range.
-      // Cross-age tabs keep signal-based discovery separate.
-      const next = {
-        ALL: [...classified].sort(sortByResearchValue),
-        FAST: classified.filter((x) => x.fast).sort(sortByResearchValue),
-        HOLDERS: classified.filter((x) => x.holderHeavy).sort(sortByHolders),
-        BOTH: classified
-          .filter((x) => x.fast && x.holderHeavy)
-          .sort(sortByResearchValue),
-        "0-5m": classified
-          .filter((x) => x.ageBucket === "0-5m")
-          .sort(sortByAgeThenMomentum),
-        "5-10m": classified
-          .filter((x) => x.ageBucket === "5-10m")
-          .sort(sortByAgeThenMomentum),
-        "10-15m": classified
-          .filter((x) => x.ageBucket === "10-15m")
-          .sort(sortByAgeThenMomentum),
-        "15-30m": classified
-          .filter((x) => x.ageBucket === "15-30m")
-          .sort(sortByAgeThenMomentum),
-        "30-60m": classified
-          .filter((x) => x.ageBucket === "30-60m")
-          .sort(sortByAgeThenMomentum),
+      const sortAge = (a, b) => {
+        const ageA =
+          a.ageMinutes === null ? Number.POSITIVE_INFINITY : a.ageMinutes;
+        const ageB =
+          b.ageMinutes === null ? Number.POSITIVE_INFINITY : b.ageMinutes;
+        return ageA - ageB || sortResearch(a, b);
       };
 
-      // Cap only after the full universe has been discovered/classified.
-      Object.keys(next).forEach((key) => {
-        next[key] = next[key].slice(0, Math.max(1, settings.maxResults));
+      const result = makeEmpty();
+      result.ALL = [...classified].sort(sortResearch);
+      result.FAST = classified.filter((x) => x.fast).sort(sortResearch);
+      result.HOLDERS = classified
+        .filter((x) => x.holderHeavy)
+        .sort(sortHolders);
+      result.BOTH = classified
+        .filter((x) => x.fast && x.holderHeavy)
+        .sort(sortResearch);
+
+      AGE_BUCKETS.forEach((bucket) => {
+        result[bucket] = classified
+          .filter((x) => x.ageBucket === bucket)
+          .sort(sortAge);
       });
 
-      setTokens(next);
+      Object.keys(result).forEach((key) => {
+        result[key] = result[key].slice(0, Math.max(1, settings.maxResults));
+      });
+
+      setTokens(result);
+      setDiscoveryStats({
+        profiles: dexDiscovery.profilesCount,
+        boosts: dexDiscovery.boostsCount,
+        dexPairs: dexPairDiscovery.tokens.length,
+        birdeye: birdeyeDiscovery.tokens.length,
+        merged: classified.length,
+      });
       setLastScanned(new Date().toLocaleTimeString());
     } catch (error) {
       console.error("Scanning error:", error);
-      setErrors((prev) => [...prev, error?.message || "Scanning failed."]);
-      setTokens({
-        ALL: [],
-        FAST: [],
-        HOLDERS: [],
-        BOTH: [],
-        "0-5m": [],
-        "5-10m": [],
-        "10-15m": [],
-        "15-30m": [],
-        "30-60m": [],
-      });
+      setErrors((old) => [...old, error?.message || "Scanning failed."]);
+      setTokens(makeEmpty());
     } finally {
       setLoading(false);
     }
@@ -707,25 +646,23 @@ export default function App() {
       holders: tokens.HOLDERS.length,
       both: tokens.BOTH.length,
       fresh: tokens["0-5m"].length,
-      early: tokens["5-10m"].length,
     }),
     [tokens],
   );
 
   return (
-    <div className="min-h-screen bg-black text-white font-mono p-4 sm:p-6 max-w-6xl mx-auto selection:bg-neutral-800">
+    <div className="min-h-screen bg-black text-white font-mono p-4 sm:p-6 max-w-7xl mx-auto selection:bg-neutral-800">
       <header className="flex flex-col xl:flex-row items-center justify-between border-b border-neutral-900 pb-5 mb-6 gap-4">
         <div className="flex items-center gap-3 w-full xl:w-auto">
           <div className="bg-neutral-900 p-2.5 rounded-xl border border-neutral-800">
             <Zap className="w-6 h-6 text-emerald-400" />
           </div>
-
           <div>
             <h1 className="text-xl font-bold tracking-tight text-neutral-100">
               SOLRUNNER
             </h1>
             <p className="text-xs text-neutral-500">
-              Broad meme-token discovery • momentum + holder count
+              Broad Solana token discovery • momentum + holders
             </p>
           </div>
         </div>
@@ -734,7 +671,7 @@ export default function App() {
           <button
             onClick={() => setShowSettings((v) => !v)}
             className="bg-neutral-900 hover:bg-neutral-800 text-neutral-400 p-3 rounded-xl border border-neutral-800 transition-all"
-            title="Configure scanner"
+            title="Scanner settings"
           >
             <Key className="w-4 h-4" />
           </button>
@@ -753,8 +690,7 @@ export default function App() {
       {showSettings && (
         <section className="mb-6 bg-neutral-950 border border-neutral-800 p-4 rounded-2xl space-y-5">
           <div className="flex items-center gap-2 text-xs text-emerald-400 font-bold">
-            <Key className="w-4 h-4" />
-            BIRDEYE DISCOVERY
+            <Key className="w-4 h-4" /> OPTIONAL BIRDEYE
           </div>
 
           <div>
@@ -763,27 +699,31 @@ export default function App() {
             </label>
             <input
               type="password"
-              placeholder="Paste Birdeye API Key"
+              placeholder="Paste Birdeye API Key (optional)"
               value={birdeyeApiKey}
               onChange={(e) => setBirdeyeApiKey(e.target.value)}
               className="w-full bg-black border border-neutral-800 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-neutral-600"
             />
             <p className="text-[10px] text-neutral-600 mt-2">
-              For production, put this behind your server/proxy instead of
-              shipping it in browser code.
+              SOLRUNNER still scans through DexScreener when this is blank.
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             <label className="text-[10px] text-neutral-500 uppercase">
-              Min holders
+              Max results
               <input
                 type="number"
-                value={settings.minHolders}
+                min="1"
+                max="500"
+                value={settings.maxResults}
                 onChange={(e) =>
                   setSettings((s) => ({
                     ...s,
-                    minHolders: safeNum(e.target.value),
+                    maxResults: Math.min(
+                      500,
+                      Math.max(1, num(e.target.value, 200)),
+                    ),
                   }))
                 }
                 className="mt-2 w-full bg-black border border-neutral-800 rounded-lg p-2 text-xs text-white"
@@ -791,14 +731,31 @@ export default function App() {
             </label>
 
             <label className="text-[10px] text-neutral-500 uppercase">
-              Min 5m price gain %
+              Min holders
               <input
                 type="number"
+                min="0"
+                value={settings.minHolders}
+                onChange={(e) =>
+                  setSettings((s) => ({
+                    ...s,
+                    minHolders: Math.max(0, num(e.target.value)),
+                  }))
+                }
+                className="mt-2 w-full bg-black border border-neutral-800 rounded-lg p-2 text-xs text-white"
+              />
+            </label>
+
+            <label className="text-[10px] text-neutral-500 uppercase">
+              Min 5m gain %
+              <input
+                type="number"
+                min="0"
                 value={settings.minFastPrice5m}
                 onChange={(e) =>
                   setSettings((s) => ({
                     ...s,
-                    minFastPrice5m: safeNum(e.target.value),
+                    minFastPrice5m: Math.max(0, num(e.target.value)),
                   }))
                 }
                 className="mt-2 w-full bg-black border border-neutral-800 rounded-lg p-2 text-xs text-white"
@@ -809,11 +766,12 @@ export default function App() {
               Min 5m volume
               <input
                 type="number"
+                min="0"
                 value={settings.minFastVolume5m}
                 onChange={(e) =>
                   setSettings((s) => ({
                     ...s,
-                    minFastVolume5m: safeNum(e.target.value),
+                    minFastVolume5m: Math.max(0, num(e.target.value)),
                   }))
                 }
                 className="mt-2 w-full bg-black border border-neutral-800 rounded-lg p-2 text-xs text-white"
@@ -824,26 +782,12 @@ export default function App() {
               Min liquidity
               <input
                 type="number"
+                min="0"
                 value={settings.minLiquidity}
                 onChange={(e) =>
                   setSettings((s) => ({
                     ...s,
-                    minLiquidity: safeNum(e.target.value),
-                  }))
-                }
-                className="mt-2 w-full bg-black border border-neutral-800 rounded-lg p-2 text-xs text-white"
-              />
-            </label>
-
-            <label className="text-[10px] text-neutral-500 uppercase">
-              Min 5m transactions
-              <input
-                type="number"
-                value={settings.minFastTxns5m}
-                onChange={(e) =>
-                  setSettings((s) => ({
-                    ...s,
-                    minFastTxns5m: safeNum(e.target.value),
+                    minLiquidity: Math.max(0, num(e.target.value)),
                   }))
                 }
                 className="mt-2 w-full bg-black border border-neutral-800 rounded-lg p-2 text-xs text-white"
@@ -858,7 +802,6 @@ export default function App() {
             >
               Save API Key
             </button>
-
             <button
               onClick={() => setSettings(DEFAULTS)}
               className="bg-neutral-900 hover:bg-neutral-800 text-xs font-bold px-4 py-2 rounded-lg text-neutral-400 border border-neutral-800"
@@ -869,64 +812,79 @@ export default function App() {
         </section>
       )}
 
-      {errors.length > 0 && (
-        <div className="mb-5 bg-neutral-950 border border-amber-900/40 rounded-xl p-3 text-[11px] text-amber-300">
-          {errors.map((error, index) => (
-            <div key={index}>{error}</div>
-          ))}
-        </div>
-      )}
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <div className="bg-neutral-950 border border-neutral-900 rounded-xl p-3">
-          <div className="flex items-center gap-2 text-[10px] text-neutral-500 uppercase">
-            <Activity className="w-3.5 h-3.5" />
-            Discovered
+      <div className="mb-6 bg-neutral-950 border border-neutral-900 rounded-xl p-3 text-[11px] space-y-2">
+        {errors.map((error, index) => (
+          <div key={index} className="flex gap-2 text-amber-300">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            {error}
           </div>
-          <p className="text-lg font-bold text-neutral-100 mt-1">
-            {counts.all}
-          </p>
-        </div>
+        ))}
 
-        <div className="bg-neutral-950 border border-neutral-900 rounded-xl p-3">
-          <div className="flex items-center gap-2 text-[10px] text-neutral-500 uppercase">
-            <TrendingUp className="w-3.5 h-3.5" />
-            Fast
+        {lastScanned ? (
+          <div className="flex flex-wrap gap-x-5 gap-y-1 text-neutral-600">
+            <span>
+              Last scan: <span className="text-neutral-400">{lastScanned}</span>
+            </span>
+            <span>
+              Profiles:{" "}
+              <span className="text-neutral-400">
+                {discoveryStats.profiles}
+              </span>
+            </span>
+            <span>
+              Boosts:{" "}
+              <span className="text-neutral-400">{discoveryStats.boosts}</span>
+            </span>
+            <span>
+              DEX pairs:{" "}
+              <span className="text-neutral-400">
+                {discoveryStats.dexPairs}
+              </span>
+            </span>
+            <span>
+              Birdeye:{" "}
+              <span className="text-neutral-400">{discoveryStats.birdeye}</span>
+            </span>
+            <span>
+              Merged:{" "}
+              <span className="text-neutral-400">{discoveryStats.merged}</span>
+            </span>
           </div>
-          <p className="text-lg font-bold text-emerald-400 mt-1">
-            {counts.fast}
-          </p>
-        </div>
+        ) : (
+          <div className="text-neutral-600">Ready. Birdeye is optional.</div>
+        )}
+      </div>
 
-        <div className="bg-neutral-950 border border-neutral-900 rounded-xl p-3">
-          <div className="flex items-center gap-2 text-[10px] text-neutral-500 uppercase">
-            <Users className="w-3.5 h-3.5" />
-            Holders
-          </div>
-          <p className="text-lg font-bold text-sky-400 mt-1">
-            {counts.holders}
-          </p>
-        </div>
-
-        <div className="bg-neutral-950 border border-neutral-900 rounded-xl p-3">
-          <div className="flex items-center gap-2 text-[10px] text-neutral-500 uppercase">
-            <Flame className="w-3.5 h-3.5" />
-            Both
-          </div>
-          <p className="text-lg font-bold text-orange-400 mt-1">
-            {counts.both}
-          </p>
-        </div>
-
-        <div className="bg-neutral-950 border border-neutral-900 rounded-xl p-3">
-          <div className="flex items-center gap-2 text-[10px] text-neutral-500 uppercase">
-            <Zap className="w-3.5 h-3.5" />
-            Fresh 0–5m
-          </div>
-          <p className="text-lg font-bold text-violet-400 mt-1">
-            {counts.fresh}
-          </p>
-        </div>
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
+        <Stat
+          icon={<Activity className="w-3.5 h-3.5" />}
+          label="Discovered"
+          value={counts.all}
+        />
+        <Stat
+          icon={<TrendingUp className="w-3.5 h-3.5" />}
+          label="Fast"
+          value={counts.fast}
+          valueClass="text-emerald-400"
+        />
+        <Stat
+          icon={<Users className="w-3.5 h-3.5" />}
+          label="Holders"
+          value={counts.holders}
+          valueClass="text-sky-400"
+        />
+        <Stat
+          icon={<Flame className="w-3.5 h-3.5" />}
+          label="Both"
+          value={counts.both}
+          valueClass="text-orange-400"
+        />
+        <Stat
+          icon={<Zap className="w-3.5 h-3.5" />}
+          label="Fresh 0–5m"
+          value={counts.fresh}
+          valueClass="text-violet-400"
+        />
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
@@ -941,22 +899,12 @@ export default function App() {
             <button
               key={key}
               onClick={() => setActiveTab(key)}
-              className={`px-3 py-2 text-[11px] font-bold rounded-lg transition-all ${
-                activeTab === key
-                  ? "bg-neutral-800 text-emerald-400 shadow-sm"
-                  : "text-neutral-500 hover:text-neutral-300"
-              }`}
+              className={`px-3 py-2 text-[11px] font-bold rounded-lg transition-all ${activeTab === key ? "bg-neutral-800 text-emerald-400 shadow-sm" : "text-neutral-500 hover:text-neutral-300"}`}
             >
               {label} ({tokens[key]?.length || 0})
             </button>
           ))}
         </div>
-
-        {lastScanned && (
-          <span className="text-[11px] text-neutral-600 font-mono">
-            LAST SCAN: <span className="text-neutral-400">{lastScanned}</span>
-          </span>
-        )}
       </div>
 
       <div className="space-y-3">
@@ -964,8 +912,9 @@ export default function App() {
           <div className="border border-dashed border-neutral-900 rounded-2xl p-12 text-center bg-neutral-950/50">
             <Flame className="w-8 h-8 text-neutral-800 mx-auto mb-3" />
             <p className="text-sm text-neutral-500">
-              Hit “SCAN SOL” to build a broad candidate set, then inspect it by
-              age, momentum, holder count, or the overlap between signals.
+              {lastScanned
+                ? "Nothing is in this filter. Check ALL for the discovered universe."
+                : "Hit SCAN SOL to start discovery."}
             </p>
           </div>
         ) : (
@@ -980,33 +929,31 @@ export default function App() {
                     <span className="font-bold text-base text-neutral-100 truncate max-w-[300px]">
                       {token.name}
                     </span>
-
                     <span className="text-xs text-neutral-500 uppercase font-semibold">
                       ${token.symbol}
                     </span>
-
-                    {token.category === "BOTH" && (
-                      <span className="bg-orange-950/60 text-orange-300 border border-orange-900/50 text-[10px] px-2 py-0.5 rounded-full font-bold">
-                        FAST + HOLDERS
-                      </span>
-                    )}
-
-                    {token.category === "FAST" && (
-                      <span className="bg-emerald-950/60 text-emerald-300 border border-emerald-900/50 text-[10px] px-2 py-0.5 rounded-full font-bold">
-                        FAST
-                      </span>
-                    )}
-
-                    {token.category === "HOLDERS" && (
-                      <span className="bg-sky-950/60 text-sky-300 border border-sky-900/50 text-[10px] px-2 py-0.5 rounded-full font-bold">
-                        HIGH HOLDERS
-                      </span>
-                    )}
-
                     {token.ageBucket && (
                       <span className="bg-neutral-900 text-neutral-400 border border-neutral-800 text-[10px] px-2 py-0.5 rounded-full font-bold">
                         {token.ageBucket}
                       </span>
+                    )}
+                    {token.category === "BOTH" && (
+                      <Badge
+                        text="FAST + HOLDERS"
+                        className="bg-orange-950/60 text-orange-300 border-orange-900/50"
+                      />
+                    )}
+                    {token.category === "FAST" && (
+                      <Badge
+                        text="FAST"
+                        className="bg-emerald-950/60 text-emerald-300 border-emerald-900/50"
+                      />
+                    )}
+                    {token.category === "HOLDERS" && (
+                      <Badge
+                        text="HIGH HOLDERS"
+                        className="bg-sky-950/60 text-sky-300 border-sky-900/50"
+                      />
                     )}
                   </div>
 
@@ -1014,7 +961,6 @@ export default function App() {
                     <span className="text-xs font-mono text-neutral-500 break-all">
                       {shortAddress(token.address)}
                     </span>
-
                     <button
                       onClick={() => copyToClipboard(token.address)}
                       className="text-neutral-500 hover:text-neutral-200 p-1 rounded"
@@ -1029,42 +975,23 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-left xl:text-right">
-                  <div>
-                    <p className="text-[10px] uppercase text-neutral-500 font-bold">
-                      Holders
-                    </p>
-                    <p className="text-sm font-bold text-sky-400">
-                      {formatNumber(token.holders)}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p className="text-[10px] uppercase text-neutral-500 font-bold">
-                      5m Price
-                    </p>
-                    <p className="text-sm font-bold text-emerald-400">
-                      {pct(token.priceChange5m)}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p className="text-[10px] uppercase text-neutral-500 font-bold">
-                      5m Volume
-                    </p>
-                    <p className="text-sm font-bold text-neutral-200">
-                      {formatUsd(token.volume5m)}
-                    </p>
-                  </div>
-
-                  <div>
-                    <p className="text-[10px] uppercase text-neutral-500 font-bold">
-                      Liquidity
-                    </p>
-                    <p className="text-sm font-bold text-neutral-300">
-                      {formatUsd(token.liquidity)}
-                    </p>
-                  </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-left xl:text-right">
+                  <Metric
+                    label="Holders"
+                    value={formatNumber(token.holders)}
+                    className="text-sky-400"
+                  />
+                  <Metric
+                    label="5m Price"
+                    value={formatPct(token.priceChange5m)}
+                    className="text-emerald-400"
+                  />
+                  <Metric label="5m Volume" value={formatUsd(token.volume5m)} />
+                  <Metric label="5m Txns" value={formatNumber(token.txns5m)} />
+                  <Metric
+                    label="Liquidity"
+                    value={formatUsd(token.liquidity)}
+                  />
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -1079,7 +1006,7 @@ export default function App() {
                     </a>
                   ) : (
                     <span className="text-[10px] text-neutral-600 uppercase">
-                      No indexed DEX pair
+                      No indexed pair
                     </span>
                   )}
                 </div>
@@ -1090,28 +1017,6 @@ export default function App() {
                   Source:{" "}
                   <span className="text-neutral-400">{token.source}</span>
                 </span>
-
-                <span>
-                  5m txns:{" "}
-                  <span className="text-neutral-400">
-                    {formatNumber(token.txns5m)}
-                  </span>
-                </span>
-
-                <span>
-                  Buys:{" "}
-                  <span className="text-neutral-400">
-                    {formatNumber(token.buys5m)}
-                  </span>
-                </span>
-
-                <span>
-                  Sells:{" "}
-                  <span className="text-neutral-400">
-                    {formatNumber(token.sells5m)}
-                  </span>
-                </span>
-
                 <span>
                   Age:{" "}
                   <span className="text-neutral-400">
@@ -1120,11 +1025,22 @@ export default function App() {
                       : `${token.ageMinutes.toFixed(1)}m`}
                   </span>
                 </span>
-
                 <span>
-                  Momentum score:{" "}
+                  Buys:{" "}
                   <span className="text-neutral-400">
-                    {safeNum(token.fastScore).toFixed(1)}
+                    {formatNumber(token.buys5m)}
+                  </span>
+                </span>
+                <span>
+                  Sells:{" "}
+                  <span className="text-neutral-400">
+                    {formatNumber(token.sells5m)}
+                  </span>
+                </span>
+                <span>
+                  Momentum:{" "}
+                  <span className="text-neutral-400">
+                    {num(token.fastScore).toFixed(1)}
                   </span>
                 </span>
               </div>
@@ -1134,12 +1050,43 @@ export default function App() {
       </div>
 
       <p className="text-[10px] text-neutral-700 mt-6 leading-relaxed">
-        Holder count is treated as a raw reported holder count for research
-        purposes; this UI does not remove wallets based on whether they may be
-        bots, snipers, bundlers, insiders, or ordinary users. Age buckets are
-        separate from momentum filters, so a fast token can appear even when it
-        is older than 5 minutes.
+        Holder counts are displayed as reported data; the app does not attempt
+        to decide whether wallets are bots, snipers, bundlers, insiders, or
+        humans.
       </p>
     </div>
+  );
+}
+
+function Stat({ icon, label, value, valueClass = "text-neutral-100" }) {
+  return (
+    <div className="bg-neutral-950 border border-neutral-900 rounded-xl p-3">
+      <div className="flex items-center gap-2 text-[10px] text-neutral-500 uppercase">
+        {icon}
+        {label}
+      </div>
+      <p className={`text-lg font-bold mt-1 ${valueClass}`}>{value}</p>
+    </div>
+  );
+}
+
+function Metric({ label, value, className = "text-neutral-300" }) {
+  return (
+    <div>
+      <p className="text-[10px] uppercase text-neutral-500 font-bold">
+        {label}
+      </p>
+      <p className={`text-sm font-bold ${className}`}>{value}</p>
+    </div>
+  );
+}
+
+function Badge({ text, className }) {
+  return (
+    <span
+      className={`border text-[10px] px-2 py-0.5 rounded-full font-bold ${className}`}
+    >
+      {text}
+    </span>
   );
 }
