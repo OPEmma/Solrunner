@@ -1,6 +1,7 @@
 import "./App.css";
 import React, { useMemo, useState } from "react";
 import axios from "axios";
+import { SolrunnerLogo } from "./components/SolrunnerLogo";
 import {
   Flame,
   ExternalLink,
@@ -654,12 +655,10 @@ export default function App() {
     <div className="min-h-screen bg-black text-white font-mono p-4 sm:p-6 max-w-7xl mx-auto selection:bg-neutral-800">
       <header className="flex flex-col xl:flex-row items-center justify-between border-b border-neutral-900 pb-5 mb-6 gap-4">
         <div className="flex items-center gap-3 w-full xl:w-auto">
-          <div className="bg-neutral-900 p-2.5 rounded-xl border border-neutral-800">
-            <Zap className="w-6 h-6 text-emerald-400" />
-          </div>
+          <SolrunnerLogo className="w-11 h-11" />
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-neutral-100">
-              SOLRUNNER
+            <h1 className="text-xl font-bold tracking-tight text-neutral-100 flex items-center gap-1.5">
+              SOL<span className="text-emerald-400">RUNNER</span>
             </h1>
             <p className="text-xs text-neutral-500">
               Broad Solana token discovery • momentum + holders
